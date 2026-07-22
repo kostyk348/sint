@@ -217,20 +217,29 @@ These are small (200-500 tokens each), queryable, and always up-to-date.
 
 ## Status
 
-| Component | Status | Notes |
-|---|---|---|
-| sint-memory | ✅ v2.1 | Hash-chain provenance, temporal decay |
-| sint-self-mcp | ✅ | Vector character DB, semantic recall |
-| sint-spec-mcp | ✅ | RFC + binary format specs |
-| sint-algo-mcp | ✅ | Rosetta Code, papers, patents |
-| sint-re-graph-mcp | ✅ | Semantic binary graph + DataTrace taint |
-| sint-devflow-mcp | ✅ | Pipeline + modular style + TDD |
-| Working Memory | 🔲 | Structured task state |
-| Epistemic Tracker | 🔲 | Beliefs + confidence + revision |
-| Constraint Tracker | 🔲 | Hard/soft limits + conflicts |
-| Analogy Engine | 🔲 | Cross-domain mapping |
-| Session Debugger | 🔲 | Replay + failure analysis |
-| Metacognitive Monitor | 🔲 | Error patterns + drift |
+| Component | Layer | Status | Notes |
+|---|---|---|---|
+| sint-memory | Memory | ✅ v2.1 | Hash-chain provenance, temporal decay, drift detection |
+| sint-self-mcp | Identity | ✅ | Vector character DB, semantic recall, owner model |
+| sint-spec-mcp | Perception | ✅ | RFC + binary format specs, hybrid search |
+| sint-algo-mcp | Perception | ✅ | Rosetta Code, papers, patents, docs |
+| sint-re-graph-mcp | Perception | ✅ | Semantic binary graph + DataTrace taint |
+| sint-devflow-mcp | Cognition | ✅ | Pipeline + modular style + TDD + edge cases |
+| sint-crypto-mcp | Cognition | ✅ | 25+ ciphers, test vectors, pattern detection |
+| sint-embed-mcp | Cognition | ✅ | MCU database, RTOS patterns, code gen |
+| sint-working-mcp | Memory | ✅ | Task state, findings, beliefs, epistemic state |
+| sint-historian-mcp | Memory | ✅ | Session analytics, drift detection, work reports |
+| sint-learner-mcp | Feedback | ✅ | Error patterns, improvements, pre-session check |
+| sint-portfolio-mcp | Feedback | ✅ | Project portfolio, knowledge transfer links |
+| sint-critic | Metacognition | ✅ | Register audits, fact-checking, code review |
+| sint-main | — | ✅ | Primary orchestrator, session lifecycle |
+| sint-scribe | — | ✅ | Memory management agent |
+| sint-router | — | ✅ | Task classification, skill recommendation |
+| Log Parser | Perception | 🔲 | Events → correlated timeline |
+| Analogy Engine | Cognition | 🔲 | Cross-domain structural mapping |
+| Constraint Tracker | Metacognition | 🔲 | Hard/soft limits, conflict detection |
+| Metacognitive Monitor | Metacognition | 🔲 | Error pattern analysis, drift alerts |
+| Session Replay | Feedback | 🔲 | Replay + failure analysis |
 
 ---
 
