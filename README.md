@@ -17,7 +17,8 @@ sint/
 │   ├── historian/          Cross-session work analyst
 │   ├── re-graph/           Semantic binary graph (reverse eng)
 │   ├── self/               Agent identity vector DB
-│   └── spec/               RFC + format specifications
+│   ├── spec/               RFC + format specifications
+│   └── working/            Working memory + epistemic state
 ├── core/                   ← Memory system + agent runtime
 │   ├── memory/             Hash-chain structured memory
 │   ├── agents/             Agent definitions (main, scribe, critic, router)
@@ -42,6 +43,7 @@ sint/
 | **re-graph** | Semantic binary graph | `build_graph`, `query_semantic`, `trace_forward` |
 | **self** | Agent identity/character recall | `self_recall`, `self_teach`, `self_seed` |
 | **spec** | RFC + format specifications | `get_rfc`, `describe_format`, `search_spec` |
+| **working** | Working memory + epistemic state | `get_state`, `add_finding`, `add_belief`, `contradict` |
 
 ## Quick Start
 
