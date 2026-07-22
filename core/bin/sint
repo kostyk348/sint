@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+"""
+sint — Unified CLI for SINT-UA v2.1 memory system.
+
+Usage:
+  sint status          — Memory stats and current focus
+  sint recent [n]      — Last N chain entries (default: 5)
+  sint search <query>  — Search blocks by content
+  sint block <id>      — Show specific block
+  sint verify          — Verify hash chain integrity
+  sint add <reg> <text> — Add new block
+  sint session         — Session logs
+
+  sint decay           — Apply temporal decay
+  sint heat <id>       — Heat up a block
+  sint tiers           — Show hot/warm/cold tiers
+  sint drift           — Check for drift anomalies
+  sint trace <id>      — Provenance archaeology
+  sint tree <id>       — Dependency tree
+
+  sint git link        — Link memory blocks to git commits
+  sint git trace <id>  — Trace block through git history
+  sint git timeline    — Combined memory + git timeline
+  sint git info        — Show current commit info
+
+  sint dashboard       — Full dashboard view
+  sint help            — Show help
+"""
+
+import hashlib
+import json
+import math
+import os
+import sys
+from collections import Counter
+from datetime import datetime, timedelta
+from pathlib import Path
+
+MEMORY_DIR = Path(os.environ.get("SINT_MEMORY_DIR", "/home/lain/.opencode/memory"))
+BLOCKS_DIR = MEMORY_DIR / "blocks"
+SESSIONS_DIR = MEMORY_DIR / "sessions"
+STATE_FILE = MEMORY_DIR / "state.json"
+CHAIN_FILE = MEMORY_DIR / "chain.jsonl"
+
+R = "\033[0m"
+B = "\033[1m"
+G = "\033[32m"
+Y = "\033[33m"
+C = "\033[36m"
+M = "\033[35m"
+D = "\033[2m"
+RED = "\033[31m"
+
+
+def compute_hash(block_id, register, content, prev_hash):
+    payload = f"{block_id}:{register}:{content}:{prev_hash}"
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def load_blocks():
+    blocks = {}
+    for f in BLOCKS_DIR.glob("*.json"):
+        try:
+            b = json.loads(f.read_text())
+            blocks[b["id"]] = b
+        except:
+            pass
+    return blocks
+
+
+def load_chain():
+    if not CHAIN_FILE.exists():
+        return []
+    return [json.loads(l) for l in CHAIN_FILE.read_text().strip().split("\n") if l.strip()]
+
+
+def load_state():
+    return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+
+
+def load_block(bid):
+    for f in BLOCKS_DIR.glob(f"{bid}.*.json"):
+        return json.loads(f.read_text())
+    return None
+
+
+def cmd_status():
+    state = load_state()
+    chain = load_chain()
+    blocks = list(BLOCKS_DIR.glob("*.json")) if BLOCKS_DIR.exists() else []
+    sessions = list(SESSIONS_DIR.glob("*.jsonl")) if SESSIONS_DIR.exists() else []
+
+    regs = {}
+    for f in blocks:
+        b = json.loads(f.read_text())
+        r = b.get("register", "?")
+        regs[r] = regs.get(r, 0) + 1
+
+    print(f"\n{B}{C}╔══════════════════════════════════════╗{R}")
+    print(f"{B}{C}║       SINT-UA v2.1 — Memory          ║{R}")
+    print(f"{B}{C}╚══════════════════════════════════════╝{R}\n")
+
+    print(f"  {B}Blocks:{R}     {len(blocks)}")
+    print(f"  {B}Chain:{R}      {len(chain)} entries")
+    print(f"  {B}Sessions:{R}   {len(sessions)}")
+    if regs:
+        print(f"  {B}By register:{R}")
+        for r, c in sorted(regs.items()):
+            print(f"    {G}{r}{R}: {c}")
+
+    focus = state.get("focus", [])
+    if focus:
+        print(f"\n  {B}{Y}Current Focus:{R}")
+        for i, f in enumerate(focus, 1):
+            print(f"    {i}. {B}{f.get('project','?')}{R} — {f.get('task','?')} {D}[{f.get('status','?')}]{R}")
+
+    pending = state.get("pending_decisions", [])
+    if pending:
+        print(f"\n  {B}{M}Pending Decisions:{R}")
+        for d in pending:
+            print(f"    • {d.get('question','?')}")
+
+    print(f"\n  {B}Last session:{R} {state.get('last_session','?')}\n")
+
+
+def cmd_recent(n=5):
+    chain = load_chain()
+    if not chain:
+        print("No chain entries.")
+        return
+
+    print(f"\n{B}{C}Last {n} chain entries:{R}\n")
+    for entry in chain[-n:]:
+        eid = entry.get("id", "?")
+        h = entry.get("hash", "?")[:8]
+        ts = entry.get("timestamp", "?")[:19]
+        print(f"  {G}{eid}{R} {D}{h}...{R} {D}{ts}{R}")
+        block = load_block(eid)
+        if block:
+            print(f"    {M}{block.get('register','?')}{R} {B}{block.get('project','?')}{R}: {block.get('content','')[:60]}")
+    print()
+
+
+def cmd_search(query):
+    if not BLOCKS_DIR.exists():
+        print("No blocks.")
+        return
+
+    print(f"\n{B}{C}Search: '{query}'{R}\n")
+    found = 0
+    for f in sorted(BLOCKS_DIR.glob("*.json"), reverse=True):
+        block = json.loads(f.read_text())
+        if query.lower() in block.get("content", "").lower():
+            print(f"  {G}{block.get('id','?')}{R} {M}{block.get('register','?')}{R} {B}{block.get('project','?')}{R}")
+            print(f"    {block.get('content','')[:80]}")
+            found += 1
+    print(f"\n  {D}Found: {found} blocks{R}\n")
+
+
+def cmd_block(bid):
+    block = load_block(bid)
+    if not block:
+        print(f"Block {bid} not found.")
+        return
+
+    print(f"\n{B}{C}Block {block.get('id')}{R}\n")
+    for key in ["register", "project", "source", "confidence", "hash", "prev_hash", "tags", "links", "_relevance"]:
+        val = block.get(key)
+        if val is not None:
+            print(f"  {B}{key}:{R}  {val}")
+    ts = block.get("timestamp", "?")
+    print(f"  {B}time:{R}    {ts[:19]}")
+    print(f"\n  {B}content:{R}")
+    for line in block.get("content", "").split("\n"):
+        print(f"    {line}")
+    print()
+
+
+def cmd_verify():
+    chain = load_chain()
+    if not chain:
+        print("No chain to verify.")
+        return
+
+    print(f"\n{B}{C}Verifying hash chain ({len(chain)} entries)...{R}\n")
+    broken = []
+    prev_hash = "0" * 16
+
+    for i, entry in enumerate(chain):
+        if entry.get("prev_hash") != prev_hash:
+            broken.append({"index": i, "id": entry.get("id"), "type": "broken_link"})
+        block = load_block(entry["id"])
+        if block:
+            expected = compute_hash(block["id"], block["register"], block["content"], block["prev_hash"])
+            if block.get("hash") != expected:
+                broken.append({"index": i, "id": entry["id"], "type": "hash_mismatch"})
+        prev_hash = entry.get("hash", prev_hash)
+
+    if broken:
+        print(f"  {Y}BROKEN:{R}")
+        for b in broken:
+            print(f"    Entry {b['index']} ({b['id']}): {b['type']}")
+    else:
+        print(f"  {G}Chain integrity: VALID{R}")
+    print()
+
+
+def cmd_add(register, content):
+    register = register.upper()
+    if register not in ("SENSE", "FACT", "LOGIC", "OPINION", "ACTION"):
+        print(f"Invalid: {register}. Use SENSE|FACT|LOGIC|OPINION|ACTION")
+        return
+
+    chain = load_chain()
+    prev_hash = chain[-1]["hash"] if chain else "0" * 16
+    next_id = f"{int(chain[-1]['id']) + 1:04d}" if chain else "0000"
+
+    block = {
+        "id": next_id, "register": register, "prev_hash": prev_hash, "hash": "",
+        "timestamp": datetime.now().isoformat() + "Z", "project": "CLI",
+        "content": content, "source": "sint-cli", "confidence": 0.9,
+        "tags": [], "links": []
+    }
+    block["hash"] = compute_hash(block["id"], block["register"], block["content"], block["prev_hash"])
+
+    BLOCKS_DIR.mkdir(parents=True, exist_ok=True)
+    (BLOCKS_DIR / f"{block['id']}.{register.lower()}.json").write_text(json.dumps(block, indent=2, ensure_ascii=False))
+    with open(CHAIN_FILE, "a") as f:
+        f.write(json.dumps(block, ensure_ascii=False) + "\n")
+
+    print(f"\n  {G}Created {block['id']}{R} ({register}): {content[:50]}...\n")
+
+
+def cmd_session():
+    if not SESSIONS_DIR.exists():
+        print("No sessions.")
+        return
+
+    print(f"\n{B}{C}Recent sessions:{R}\n")
+    for sf in sorted(SESSIONS_DIR.glob("*.jsonl"), reverse=True)[:5]:
+        events = [json.loads(l) for l in sf.read_text().strip().split("\n") if l.strip()]
+        start = next((e for e in events if e.get("event") == "session_start"), None)
+        end = next((e for e in events if e.get("event") == "session_end"), None)
+        auto = sum(1 for e in events if e.get("event") == "auto_log")
+        print(f"  {B}{sf.stem}{R}")
+        if start: print(f"    {G}start{R} agent={start.get('agent','?')}")
+        if end: print(f"    {Y}end{R}   blocks={end.get('blocks_created','?')}")
+        if auto: print(f"    {D}auto-logged: {auto} findings{R}")
+    print()
+
+
+# --- NEW FEATURES ---
+
+def _compute_relevance(block):
+    confidence = block.get("confidence", 0.5)
+    reg_w = {"FACT": 1.0, "ACTION": 0.95, "LOGIC": 0.9, "SENSE": 0.7, "OPINION": 0.6}
+    base = confidence * reg_w.get(block.get("register", "SENSE"), 0.7)
+    ts = block.get("timestamp", "")
+    decay = 1.0
+    if ts:
+        try:
+            age = (datetime.now() - datetime.fromisoformat(ts.replace("Z",""))).total_seconds() / 86400
+            decay = math.exp(-0.693 * age / 30)
+        except: pass
+    return max(min(base * decay, 1.0), 0.01)
+
+
+def cmd_decay():
+    print(f"\n{B}{C}Temporal Decay{R}\n")
+    if not BLOCKS_DIR.exists():
+        print("No blocks.")
+        return
+
+    for f in sorted(BLOCKS_DIR.glob("*.json")):
+        block = json.loads(f.read_text())
+        rel = _compute_relevance(block)
+        block["_relevance"] = round(rel, 4)
+        f.write_text(json.dumps(block, indent=2, ensure_ascii=False))
+        tier = "hot" if rel >= 0.7 else "warm" if rel >= 0.4 else "cool" if rel >= 0.15 else "cold"
+        bar = "█" * int(rel * 20) + "░" * (20 - int(rel * 20))
+        color = {"hot": RED, "warm": Y, "cool": C, "cold": D}
+        print(f"  {block['id']} {block.get('register','?'):8s} {color.get(tier,'')}{bar} {rel:.3f} [{tier}]{R}")
+    print()
+
+
+def cmd_heat(bid):
+    for f in BLOCKS_DIR.glob(f"{bid}.*.json"):
+        block = json.loads(f.read_text())
+        block["_heated_until"] = (datetime.now() + timedelta(days=7)).isoformat() + "Z"
+        f.write_text(json.dumps(block, indent=2, ensure_ascii=False))
+        print(f"\n  {G}Block {bid} heated for 7 days{R}\n")
+        return
+    print(f"Block {bid} not found")
+
+
+def cmd_drift():
+    print(f"\n{B}{C}Drift Detection{R}\n")
+    if not BLOCKS_DIR.exists():
+        print("No blocks.")
+        return
+
+    blocks = [json.loads(f.read_text()) for f in BLOCKS_DIR.glob("*.json")]
+    if not blocks:
+        print("No blocks.")
+        return
+
+    counts = Counter(b.get("register", "?") for b in blocks)
+    total = sum(counts.values())
+    dist = {r: c / total for r, c in counts.items()}
+
+    expected = {"FACT": 0.35, "SENSE": 0.25, "LOGIC": 0.20, "ACTION": 0.15, "OPINION": 0.05}
+    alerts = []
+
+    print(f"  {B}Register Distribution:{R}")
+    for reg in ["FACT", "SENSE", "LOGIC", "ACTION", "OPINION"]:
+        actual = dist.get(reg, 0)
+        exp = expected.get(reg, 0)
+        bar = "█" * int(actual * 40)
+        diff = actual - exp
+        color = G if abs(diff) < 0.1 else Y if abs(diff) < 0.2 else RED
+        print(f"    {reg:8s} {color}{bar} {actual:.1%}{R} (expected {exp:.1%})")
+        if abs(diff) > 0.3:
+            alerts.append(f"{'more' if actual > exp else 'fewer'} {reg}")
+
+    # Source coverage
+    facts = [b for b in blocks if b.get("register") == "FACT"]
+    if facts:
+        with_src = sum(1 for b in facts if b.get("source", "") not in ["agent", "migration", "CLI", ""])
+        cov = with_src / len(facts)
+        print(f"\n  {B}Source Coverage:{R} {cov:.0%} of FACT blocks")
+        if cov < 0.4:
+            alerts.append("low source coverage")
+
+    if alerts:
+        print(f"\n  {Y}⚠ Alerts:{R}")
+        for a in alerts:
+            print(f"    • {a}")
+    else:
+        print(f"\n  {G}✓ No drift detected{R}")
+    print()
+
+
+def cmd_trace(bid):
+    all_blocks = load_blocks()
+    if bid not in all_blocks:
+        print(f"Block {bid} not found.")
+        return
+
+    print(f"\n{B}{C}Provenance Archaeology: {bid}{R}\n")
+
+    chain_path = []
+    visited = set()
+    current = bid
+
+    while current and current not in visited:
+        if current not in all_blocks:
+            break
+        block = all_blocks[current]
+        visited.add(current)
+        chain_path.append(block)
+        links = block.get("links", [])
+        if links:
+            current = links[0]
+        else:
+            prev_hash = block.get("prev_hash", "")
+            found = False
+            for entry in load_chain():
+                if entry.get("hash") == prev_hash:
+                    current = entry.get("id")
+                    found = True
+                    break
+            if not found:
+                current = None
+
+    chain_path.reverse()
+
+    reg_colors = {"FACT": G, "SENSE": C, "LOGIC": Y, "ACTION": M, "OPINION": RED}
+    for i, block in enumerate(chain_path):
+        reg = block.get("register", "?")
+        color = reg_colors.get(reg, "")
+        prefix = "◀" if i == 0 else "▶" if i == len(chain_path) - 1 else "→"
+        print(f"  {prefix} {color}{block['id']} {reg}{R} {block.get('project','?')}")
+        print(f"    {block.get('content','')[:80]}")
+        if i > 0 and i < len(chain_path) - 1:
+            print(f"    {D}{block.get('timestamp','')[:19]} conf={block.get('confidence',0):.2f}{R}")
+        print()
+
+    print(f"  {D}Chain: {len(chain_path)} steps{R}\n")
+
+
+def cmd_dashboard():
+    state = load_state()
+    chain = load_chain()
+    blocks = list(BLOCKS_DIR.glob("*.json")) if BLOCKS_DIR.exists() else []
+    sessions = list(SESSIONS_DIR.glob("*.jsonl")) if SESSIONS_DIR.exists() else []
+
+    regs = Counter()
+    for f in blocks:
+        b = json.loads(f.read_text())
+        regs[b.get("register", "?")] += 1
+
+    print(f"\n{B}{C}╔══════════════════════════════════════════════════════════════╗{R}")
+    print(f"{B}{C}║                  SINT-UA v2.1 — Dashboard                    ║{R}")
+    print(f"{B}{C}╚══════════════════════════════════════════════════════════════╝{R}\n")
+
+    print(f"  {B}MEMORY{R}")
+    print(f"  Blocks: {len(blocks)} | Chain: {len(chain)} | Sessions: {len(sessions)}")
+    for r in ["FACT", "SENSE", "LOGIC", "ACTION", "OPINION"]:
+        print(f"    {r}: {regs.get(r, 0)}")
+
+    focus = state.get("focus", [])
+    if focus:
+        print(f"\n  {B}FOCUS{R}")
+        for i, f in enumerate(focus, 1):
+            print(f"    {i}. {B}{f.get('project','?')}{R} — {f.get('task','?')}")
+
+    pending = state.get("pending_decisions", [])
+    if pending:
+        print(f"\n  {B}PENDING{R}")
+        for d in pending:
+            print(f"    • {d.get('question','?')}")
+
+    # Recent blocks
+    print(f"\n  {B}RECENT{R}")
+    for entry in chain[-5:]:
+        block = load_block(entry.get("id", ""))
+        if block:
+            reg = block.get("register", "?")
+            color = {"FACT": G, "SENSE": C, "LOGIC": Y, "ACTION": M, "OPINION": RED}.get(reg, "")
+            print(f"    {entry.get('id','?')} {color}{reg}{R} {block.get('content','')[:50]}")
+
+    print(f"\n  {D}State: {state.get('last_session','?')}{R}\n")
+
+
+def cmd_help():
+    print(f"""
+{B}{C}sint — SINT-UA v2.1 Unified CLI{R}
+
+{B}Memory:{R}
+  sint status            Stats and current focus
+  sint recent [n]        Last N chain entries
+  sint search <query>    Search blocks
+  sint block <id>        Block details
+  sint verify            Verify hash chain
+  sint add <reg> <text>  Add new block
+  sint session           Session logs
+
+{B}Advanced:{R}
+  sint decay             Apply temporal decay
+  sint heat <id>         Heat up a block
+  sint drift             Drift detection
+  sint trace <id>        Provenance archaeology
+  sint dashboard         Full dashboard
+
+{B}Examples:{R}
+  sint status
+  sint trace 0006
+  sint drift
+  sint add FACT "Verified: drift detection works"
+""")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] == "help":
+        cmd_help()
+    elif args[0] == "status":
+        cmd_status()
+    elif args[0] == "recent":
+        cmd_recent(int(args[1]) if len(args) > 1 else 5)
+    elif args[0] == "search":
+        cmd_search(" ".join(args[1:])) if len(args) > 1 else print("Usage: sint search <query>")
+    elif args[0] == "block":
+        cmd_block(args[1]) if len(args) > 1 else print("Usage: sint block <id>")
+    elif args[0] == "verify":
+        cmd_verify()
+    elif args[0] == "add":
+        cmd_add(args[1], " ".join(args[2:])) if len(args) > 2 else print("Usage: sint add <reg> <text>")
+    elif args[0] == "session":
+        cmd_session()
+    elif args[0] == "decay":
+        cmd_decay()
+    elif args[0] == "heat":
+        cmd_heat(args[1]) if len(args) > 1 else print("Usage: sint heat <id>")
+    elif args[0] == "drift":
+        cmd_drift()
+    elif args[0] == "trace":
+        cmd_trace(args[1]) if len(args) > 1 else print("Usage: sint trace <id>")
+    elif args[0] == "git":
+        # Delegate to sint-git
+        import subprocess
+        git_script = Path(__file__).parent / "sint-git"
+        subprocess.run([sys.executable, str(git_script)] + args[1:])
+    elif args[0] == "dashboard":
+        cmd_dashboard()
+    else:
+        print(f"Unknown: {args[0]}. Try 'sint help'")
+
+
+if __name__ == "__main__":
+    main()

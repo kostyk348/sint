@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+"""
+sint-git — Git integration for SINT memory system.
+
+Links memory blocks to git commits, enabling provenance tracing
+through git history. Commits become part of the audit trail.
+
+Usage:
+  python3 sint-git.py link           — Link recent commits to memory blocks
+  python3 sint-git.py trace <id>     — Trace block through git history
+  python3 sint-git.py timeline       — Combined memory + git timeline
+  python3 sint-git.py commit-info    — Show commit details
+  python3 sint-git.py stats          — Git integration stats
+"""
+
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+MEMORY_DIR = Path(os.environ.get("SINT_MEMORY_DIR", "/home/lain/.opencode/memory"))
+BLOCKS_DIR = MEMORY_DIR / "blocks"
+CHAIN_FILE = MEMORY_DIR / "chain.jsonl"
+STATE_FILE = MEMORY_DIR / "state.json"
+GIT_LINKS_FILE = MEMORY_DIR / "git_links.jsonl"
+
+
+def run_git(args: list, cwd: str = None) -> str:
+    """Run git command and return output."""
+    try:
+        result = subprocess.run(
+            ["git"] + args,
+            capture_output=True,
+            text=True,
+            cwd=cwd or os.getcwd()
+        )
+        return result.stdout.strip()
+    except Exception as e:
+        return ""
+
+
+def get_recent_commits(n: int = 20) -> list:
+    """Get recent git commits."""
+    output = run_git(["log", f"-{n}", "--format=%H|%s|%ai|%an"])
+    if not output:
+        return []
+    
+    commits = []
+    for line in output.split("\n"):
+        if "|" in line:
+            parts = line.split("|", 3)
+            if len(parts) >= 3:
+                commits.append({
+                    "hash": parts[0],
+                    "message": parts[1],
+                    "date": parts[2],
+                    "author": parts[3] if len(parts) > 3 else "unknown"
+                })
+    return commits
+
+
+def get_commit_files(hash: str) -> list:
+    """Get files changed in a commit."""
+    output = run_git(["diff-tree", "--no-commit-id", "-r", "--name-status", hash])
+    files = []
+    for line in output.split("\n"):
+        if line:
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                files.append({"status": parts[0], "path": parts[1]})
+    return files
+
+
+def get_file_commits(filepath: str, n: int = 10) -> list:
+    """Get commits that touched a specific file."""
+    output = run_git(["log", f"-{n}", "--format=%H|%s|%ai", "--", filepath])
+    commits = []
+    for line in output.split("\n"):
+        if "|" in line:
+            parts = line.split("|", 2)
+            if len(parts) >= 2:
+                commits.append({
+                    "hash": parts[0],
+                    "message": parts[1],
+                    "date": parts[2]
+                })
+    return commits
+
+
+def link_blocks_to_commits():
+    """Link memory blocks to git commits based on timestamps and file changes."""
+    commits = get_recent_commits(50)
+    if not commits:
+        print("No git commits found.")
+        return
+    
+    # Load existing links
+    existing_links = {}
+    if GIT_LINKS_FILE.exists():
+        for line in GIT_LINKS_FILE.read_text().strip().split("\n"):
+            if line.strip():
+                link = json.loads(line)
+                existing_links[link["block_id"]] = link
+    
+    # Load blocks
+    blocks = {}
+    for f in BLOCKS_DIR.glob("*.json"):
+        try:
+            block = json.loads(f.read_text())
+            blocks[block["id"]] = block
+        except:
+            pass
+    
+    new_links = 0
+    for bid, block in blocks.items():
+        if bid in existing_links:
+            continue
+        
+        block_ts = block.get("timestamp", "")
+        if not block_ts:
+            continue
+        
+        # Parse block timestamp
+        try:
+            block_time = datetime.fromisoformat(block_ts.replace("Z", "+00:00")).replace(tzinfo=None)
+        except:
+            continue
+        
+        # Find commits around this time
+        for commit in commits:
+            try:
+                commit_time = datetime.strptime(commit["date"][:19], "%Y-%m-%d %H:%M:%S")
+                # Link if commit is within 2 hours before or 1 hour after block creation
+                diff = (block_time - commit_time).total_seconds()
+                if -3600 <= diff <= 7200:
+                    link = {
+                        "block_id": bid,
+                        "commit_hash": commit["hash"],
+                        "commit_message": commit["message"],
+                        "commit_date": commit["date"],
+                        "block_timestamp": block_ts,
+                        "time_diff_seconds": diff,
+                        "linked_at": datetime.now().isoformat()
+                    }
+                    
+                    with open(GIT_LINKS_FILE, "a") as f:
+                        f.write(json.dumps(link, ensure_ascii=False) + "\n")
+                    
+                    existing_links[bid] = link
+                    new_links += 1
+                    break
+            except:
+                continue
+    
+    print(f"\n  Linked {new_links} new blocks to commits")
+    print(f"  Total links: {len(existing_links)}\n")
+
+
+def trace_block_git(block_id: str) -> list:
+    """Trace a block through git history."""
+    links = []
+    if GIT_LINKS_FILE.exists():
+        for line in GIT_LINKS_FILE.read_text().strip().split("\n"):
+            if line.strip():
+                link = json.loads(line)
+                if link["block_id"] == block_id:
+                    links.append(link)
+    
+    if not links:
+        # Try to find commit by timestamp
+        block_file = None
+        for f in BLOCKS_DIR.glob(f"{block_id}.*.json"):
+            block_file = f
+            break
+        
+        if not block_file:
+            return []
+        
+        block = json.loads(block_file.read_text())
+        block_ts = block.get("timestamp", "")
+        
+        if block_ts:
+            # Search git log around this time
+            try:
+                block_time = datetime.fromisoformat(block_ts.replace("Z", "+00:00")).replace(tzinfo=None)
+                output = run_git(["log", "--before:" + block_time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                  "--after:" + (block_time - __import__('datetime').timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S"),
+                                  "--format=%H|%s|%ai"])
+                
+                for line in output.split("\n"):
+                    if "|" in line:
+                        parts = line.split("|", 2)
+                        links.append({
+                            "block_id": block_id,
+                            "commit_hash": parts[0],
+                            "commit_message": parts[1],
+                            "commit_date": parts[2],
+                            "match_type": "timestamp_proximity"
+                        })
+            except:
+                pass
+    
+    return links
+
+
+def get_combined_timeline(project: str = None, n: int = 30) -> list:
+    """Get combined timeline of memory blocks and git commits."""
+    events = []
+    
+    # Memory blocks
+    for f in BLOCKS_DIR.glob("*.json"):
+        try:
+            block = json.loads(f.read_text())
+            if project and block.get("project") != project:
+                continue
+            events.append({
+                "type": "block",
+                "id": block["id"],
+                "timestamp": block.get("timestamp", ""),
+                "register": block.get("register", ""),
+                "project": block.get("project", ""),
+                "content": block.get("content", "")[:80]
+            })
+        except:
+            pass
+    
+    # Git commits
+    for commit in get_recent_commits(n):
+        events.append({
+            "type": "commit",
+            "hash": commit["hash"][:8],
+            "timestamp": commit["date"],
+            "message": commit["message"][:80],
+            "author": commit["author"]
+        })
+    
+    # Sort by timestamp
+    events.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+    
+    return events[:n]
+
+
+def cmd_link():
+    link_blocks_to_commits()
+
+
+def cmd_trace(block_id: str):
+    links = trace_block_git(block_id)
+    
+    print(f"\n\033[1m\033[36mGit Links for {block_id}:\033[0m\n")
+    
+    if links:
+        for link in links:
+            print(f"  \033[32m{link.get('commit_hash', '?')[:8]}\033[0m")
+            print(f"    {link.get('commit_message', '?')}")
+            print(f"    {link.get('commit_date', '?')}")
+            if "time_diff_seconds" in link:
+                diff = link["time_diff_seconds"]
+                print(f"    Time diff: {diff:.0f}s")
+            print()
+    else:
+        print("  No git links found.\n")
+
+
+def cmd_timeline(project: str = None):
+    events = get_combined_timeline(project)
+    
+    print(f"\n\033[1m\033[36mCombined Timeline:\033[0m\n")
+    
+    for event in events:
+        if event["type"] == "block":
+            reg = event.get("register", "?")
+            color = {"FACT": "\033[32m", "SENSE": "\033[36m", "LOGIC": "\033[33m",
+                     "ACTION": "\033[35m", "OPINION": "\033[31m"}.get(reg, "")
+            print(f"  {event.get('timestamp', '?')[:19]}  \033[1m{color}BLOCK {event['id']}\033[0m {reg}")
+            print(f"    {event.get('content', '')}")
+        else:
+            print(f"  {event.get('timestamp', '?')[:19]}  \033[1m\033[36mCOMMIT {event.get('hash', '?')}\033[0m")
+            print(f"    {event.get('message', '')}")
+        print()
+
+
+def cmd_commit_info(hash: str = None):
+    if not hash:
+        hash = run_git(["rev-parse", "HEAD"])
+    
+    # Get commit details
+    output = run_git(["log", "-1", "--format=%H%n%s%n%ai%n%an%n%b", hash])
+    if not output:
+        print(f"Commit {hash} not found.")
+        return
+    
+    lines = output.split("\n")
+    full_hash = lines[0] if len(lines) > 0 else hash
+    message = lines[1] if len(lines) > 1 else "?"
+    date = lines[2] if len(lines) > 2 else "?"
+    author = lines[3] if len(lines) > 3 else "?"
+    body = lines[4] if len(lines) > 4 else ""
+    
+    # Get files
+    files = get_commit_files(full_hash)
+    
+    print(f"\n\033[1m\033[36mCommit {full_hash[:8]}:\033[0m\n")
+    print(f"  Message: {message}")
+    print(f"  Date:    {date}")
+    print(f"  Author:  {author}")
+    if body:
+        print(f"  Body:    {body}")
+    
+    print(f"\n  Files changed: {len(files)}")
+    for f in files[:10]:
+        status_color = "\033[32m" if f["status"] == "A" else "\033[31m" if f["status"] == "D" else "\033[33m"
+        print(f"    {status_color}{f['status']}\033[0m {f['path']}")
+    print()
+
+
+def cmd_stats():
+    # Git stats
+    total_commits = len(run_git(["rev-list", "--count", "HEAD"]).split("\n"))
+    contributors = len(run_git(["shortlog", "-sne", "--no-merges"]).split("\n"))
+    
+    # Link stats
+    links = []
+    if GIT_LINKS_FILE.exists():
+        for line in GIT_LINKS_FILE.read_text().strip().split("\n"):
+            if line.strip():
+                links.append(json.loads(line))
+    
+    # Block stats
+    blocks = len(list(BLOCKS_DIR.glob("*.json"))) if BLOCKS_DIR.exists() else 0
+    
+    print(f"\n\033[1m\033[36mGit Integration Stats:\033[0m\n")
+    print(f"  Total commits:     {total_commits}")
+    print(f"  Contributors:      {contributors}")
+    print(f"  Memory blocks:     {blocks}")
+    print(f"  Block-commit links: {len(links)}")
+    
+    if links:
+        # Average time diff
+        diffs = [l.get("time_diff_seconds", 0) for l in links if "time_diff_seconds" in l]
+        if diffs:
+            avg_diff = sum(diffs) / len(diffs)
+            print(f"  Avg time to link:  {avg_diff:.0f}s")
+    print()
+
+
+def main():
+    args = sys.argv[1:]
+    
+    if not args or args[0] == "help":
+        print(__doc__)
+    elif args[0] == "link":
+        cmd_link()
+    elif args[0] == "trace":
+        cmd_trace(args[1]) if len(args) > 1 else print("Usage: sint-git trace <block_id>")
+    elif args[0] == "timeline":
+        cmd_timeline(args[1] if len(args) > 1 else None)
+    elif args[0] == "commit-info":
+        cmd_commit_info(args[1] if len(args) > 1 else None)
+    elif args[0] == "stats":
+        cmd_stats()
+    else:
+        print(f"Unknown: {args[0]}")
+
+
+if __name__ == "__main__":
+    main()

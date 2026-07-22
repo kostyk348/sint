@@ -1,0 +1,48 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Cache directories
+cache/
+*.db
+*.sqlite
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# MCP server caches
+mcp/*/cache/
+mcp/*/__pycache__/
+core/*/__pycache__/
+
+# Memory data (user-specific)
+core/memory/blocks/
+core/memory/sessions/
+core/memory/chain.jsonl
+core/memory/state.json
+core/memory/git_links.jsonl
+
+# Temp
+*.tmp
+*.bak

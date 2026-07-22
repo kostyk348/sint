@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "sint-memory-mcp"
+version = "2.1.0"
+description = "MCP server for SINT-UA structured agent memory"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "kostyk348"}
+]
+keywords = ["mcp", "memory", "agent", "opencode", "sint"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "mcp",
+    "sentence-transformers",
+    "faiss-cpu",
+]
+
+[project.urls]
+Homepage = "https://github.com/kostyk348/sint-ua-v2.1"
+Repository = "https://github.com/kostyk348/sint-ua-v2.1"
+Issues = "https://github.com/kostyk348/sint-ua-v2.1/issues"
+
+[project.scripts]
+sint-memory-server = "mcp.sint_memory.server:main"

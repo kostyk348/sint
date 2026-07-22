@@ -1,0 +1,33 @@
+# Core
+fastmcp>=0.4.0
+httpx
+
+# Memory & Indexing
+sqlite-utils
+fastembed
+numpy
+
+# Algorithm MCP
+# (uses core deps above)
+
+# Crypto MCP
+# (pure Python, no extra deps)
+
+# Devflow MCP
+# (pure Python, no extra deps)
+
+# Embed MCP
+# (pure Python, no extra deps)
+
+# Historian MCP
+# (pure Python, no extra deps)
+
+# Re-Graph MCP
+networkx
+lief
+
+# Self MCP
+# (uses fastembed + numpy from core)
+
+# Spec MCP
+# (uses core deps above)

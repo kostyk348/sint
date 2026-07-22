@@ -1,0 +1,413 @@
+#!/usr/bin/env python3
+"""
+sint-archaeology — Provenance archaeology for SINT memory system.
+
+Given a block ID or topic, trace back through the hash chain to reconstruct
+the full reasoning path: what facts led to what inferences led to what decisions.
+
+This answers: "Why did we decide X?" → trace every step back to raw observations.
+
+Usage:
+  python3 sint-archaeology.py trace <block_id>     — Full reasoning chain
+  python3 sint-archaeology.py tree <block_id>       — Dependency tree
+  python3 sint-archaeology.py genesis <block_id>    — Find root cause
+  python3 sint-archaeology.py timeline <project>    — Project evolution
+  python3 sint-archaeology.py deps <block_id>       — Direct dependencies
+"""
+
+import json
+import sys
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+MEMORY_DIR = Path("/home/lain/.opencode/memory")
+BLOCKS_DIR = MEMORY_DIR / "blocks"
+CHAIN_FILE = MEMORY_DIR / "chain.jsonl"
+
+
+def load_all_blocks() -> dict[str, dict]:
+    blocks = {}
+    if not BLOCKS_DIR.exists():
+        return blocks
+    for f in BLOCKS_DIR.glob("*.json"):
+        try:
+            block = json.loads(f.read_text())
+            blocks[block["id"]] = block
+        except:
+            pass
+    return blocks
+
+
+def load_chain() -> list[dict]:
+    if not CHAIN_FILE.exists():
+        return []
+    lines = CHAIN_FILE.read_text().strip().split("\n")
+    return [json.loads(l) for l in lines if l.strip()]
+
+
+def find_related_blocks(block: dict, all_blocks: dict) -> dict:
+    """Find blocks that are related via links, content references, or project."""
+    related = {
+        "linked_from": [],    # Blocks that link TO this block
+        "linked_to": [],      # Blocks this block links to
+        "same_project": [],   # Blocks in same project
+        "content_refs": []    # Blocks referenced in content
+    }
+    
+    bid = block.get("id", "")
+    project = block.get("project", "")
+    content = block.get("content", "")
+    
+    for other_id, other in all_blocks.items():
+        if other_id == bid:
+            continue
+        
+        # Links
+        if bid in other.get("links", []):
+            related["linked_from"].append(other_id)
+        
+        if other_id in block.get("links", []):
+            related["linked_to"].append(other_id)
+        
+        # Same project
+        if other.get("project") == project and project != "SYSTEM":
+            related["same_project"].append(other_id)
+        
+        # Content references (IDs mentioned in text)
+        if other_id in content:
+            related["content_refs"].append(other_id)
+    
+    return related
+
+
+def trace_reasoning_chain(block_id: str, all_blocks: dict, chain: list) -> list:
+    """Trace the full reasoning chain from block back to genesis."""
+    if block_id not in all_blocks:
+        return []
+    
+    chain_path = []
+    visited = set()
+    current_id = block_id
+    
+    while current_id and current_id not in visited:
+        if current_id not in all_blocks:
+            break
+        
+        block = all_blocks[current_id]
+        visited.add(current_id)
+        
+        chain_path.append({
+            "id": block["id"],
+            "register": block.get("register", "?"),
+            "project": block.get("project", "?"),
+            "content": block.get("content", "")[:100],
+            "timestamp": block.get("timestamp", "?")[:19],
+            "confidence": block.get("confidence", 0)
+        })
+        
+        # Follow links backwards
+        links = block.get("links", [])
+        if links:
+            # Prefer following the most relevant link
+            current_id = links[0]
+        else:
+            # Follow prev_hash to previous block in chain
+            prev_hash = block.get("prev_hash", "")
+            if prev_hash:
+                for entry in chain:
+                    if entry.get("hash") == prev_hash:
+                        current_id = entry.get("id")
+                        break
+                else:
+                    current_id = None
+            else:
+                current_id = None
+    
+    return list(reversed(chain_path))
+
+
+def build_dependency_tree(block_id: str, all_blocks: dict, depth: int = 0, max_depth: int = 5) -> dict:
+    """Build a dependency tree from a block."""
+    if block_id not in all_blocks or depth > max_depth:
+        return None
+    
+    block = all_blocks[block_id]
+    tree = {
+        "id": block["id"],
+        "register": block.get("register", "?"),
+        "project": block.get("project", "?"),
+        "content": block.get("content", "")[:80],
+        "children": []
+    }
+    
+    # Follow links
+    for link_id in block.get("links", []):
+        child = build_dependency_tree(link_id, all_blocks, depth + 1, max_depth)
+        if child:
+            tree["children"].append(child)
+    
+    # Follow chain backwards (prev block)
+    prev_hash = block.get("prev_hash", "")
+    chain = load_chain()
+    for entry in chain:
+        if entry.get("hash") == prev_hash and entry.get("id") != block_id:
+            prev_block = build_dependency_tree(entry["id"], all_blocks, depth + 1, max_depth)
+            if prev_block:
+                tree["children"].append(prev_block)
+            break
+    
+    return tree
+
+
+def find_genesis(block_id: str, all_blocks: dict, chain: list) -> list:
+    """Find the root cause / genesis blocks that led to this block."""
+    chain_path = trace_reasoning_chain(block_id, all_blocks, chain)
+    
+    if not chain_path:
+        return []
+    
+    # Genesis = first blocks in the chain
+    genesis = []
+    for step in chain_path:
+        register = step.get("register", "?")
+        if register in ("SENSE", "FACT"):
+            genesis.append(step)
+        else:
+            break  # Stop at first non-data block
+    
+    return genesis
+
+
+def trace_project_timeline(project: str, all_blocks: dict) -> list:
+    """Trace the evolution of a project through blocks."""
+    project_blocks = []
+    
+    for block in all_blocks.values():
+        if block.get("project") == project:
+            project_blocks.append({
+                "id": block["id"],
+                "register": block.get("register", "?"),
+                "content": block.get("content", "")[:100],
+                "timestamp": block.get("timestamp", "?")[:19],
+                "confidence": block.get("confidence", 0)
+            })
+    
+    project_blocks.sort(key=lambda b: b["id"])
+    return project_blocks
+
+
+def print_tree(tree: dict, prefix: str = "", is_last: bool = True):
+    """Pretty-print a dependency tree."""
+    if tree is None:
+        return
+    
+    connector = "└── " if is_last else "├── "
+    register = tree.get("register", "?")
+    project = tree.get("project", "?")
+    content = tree.get("content", "")[:50]
+    
+    reg_colors = {
+        "FACT": "\033[32m", "SENSE": "\033[36m", "LOGIC": "\033[33m",
+        "ACTION": "\033[35m", "OPINION": "\033[31m"
+    }
+    color = reg_colors.get(register, "")
+    
+    print(f"  {prefix}{connector}{color}{tree['id']} {register}\033[0m {project}: {content}")
+    
+    children = tree.get("children", [])
+    for i, child in enumerate(children):
+        new_prefix = prefix + ("    " if is_last else "│   ")
+        print_tree(child, new_prefix, i == len(children) - 1)
+
+
+def cmd_trace(block_id: str):
+    """Full reasoning chain trace."""
+    all_blocks = load_all_blocks()
+    chain = load_chain()
+    
+    if block_id not in all_blocks:
+        print(f"Block {block_id} not found.")
+        return
+    
+    chain_path = trace_reasoning_chain(block_id, all_blocks, chain)
+    
+    if not chain_path:
+        print(f"No reasoning chain found for {block_id}.")
+        return
+    
+    print(f"\n\033[1m\033[36m{'='*60}\033[0m")
+    print(f"\033[1m\033[36m  Provenance Archaeology: {block_id}\033[0m")
+    print(f"\033[1m\033[36m{'='*60}\033[0m\n")
+    
+    print(f"\033[1m  Reasoning Chain ({len(chain_path)} steps):\033[0m\n")
+    
+    reg_colors = {
+        "FACT": "\033[32m", "SENSE": "\033[36m", "LOGIC": "\033[33m",
+        "ACTION": "\033[35m", "OPINION": "\033[31m"
+    }
+    
+    for i, step in enumerate(chain_path):
+        is_first = i == 0
+        is_last = i == len(chain_path) - 1
+        
+        register = step.get("register", "?")
+        color = reg_colors.get(register, "")
+        
+        if is_first:
+            prefix = "  ◀ "
+        elif is_last:
+            prefix = "  ▶ "
+        else:
+            prefix = "  → "
+        
+        connector = "═══" if is_first or is_last else "───"
+        
+        print(f"  {prefix}{color}{step['id']} {register}\033[0m {step['project']}")
+        print(f"       {step['content']}")
+        if not is_first and not is_last:
+            print(f"       \033[2m{step['timestamp']} conf={step['confidence']:.2f}\033[0m")
+        print()
+    
+    # Find genesis
+    genesis = find_genesis(block_id, all_blocks, chain)
+    if genesis:
+        print(f"\033[1m  Genesis Blocks (root causes):\033[0m")
+        for g in genesis:
+            print(f"    {g['id']} {g['register']}: {g['content']}")
+        print()
+
+
+def cmd_tree(block_id: str):
+    """Dependency tree."""
+    all_blocks = load_all_blocks()
+    
+    if block_id not in all_blocks:
+        print(f"Block {block_id} not found.")
+        return
+    
+    tree = build_dependency_tree(block_id, all_blocks)
+    
+    print(f"\n\033[1m  Dependency Tree for {block_id}:\033[0m\n")
+    print_tree(tree)
+    print()
+
+
+def cmd_genesis(block_id: str):
+    """Find root cause blocks."""
+    all_blocks = load_all_blocks()
+    chain = load_chain()
+    
+    if block_id not in all_blocks:
+        print(f"Block {block_id} not found.")
+        return
+    
+    genesis = find_genesis(block_id, all_blocks, chain)
+    
+    print(f"\n\033[1m  Genesis Blocks for {block_id}:\033[0m\n")
+    
+    if genesis:
+        for g in genesis:
+            print(f"    \033[32m{g['id']} {g['register']}\033[0m ({g['project']})")
+            print(f"      {g['content']}")
+            print()
+    else:
+        print("    No genesis blocks found (block may be isolated).")
+    
+    print()
+
+
+def cmd_timeline(project: str):
+    """Project evolution timeline."""
+    all_blocks = load_all_blocks()
+    timeline = trace_project_timeline(project, all_blocks)
+    
+    print(f"\n\033[1m  Timeline: {project}\033[0m\n")
+    
+    if not timeline:
+        print(f"    No blocks found for project '{project}'")
+        return
+    
+    reg_colors = {
+        "FACT": "\033[32m", "SENSE": "\033[36m", "LOGIC": "\033[33m",
+        "ACTION": "\033[35m", "OPINION": "\033[31m"
+    }
+    
+    for block in timeline:
+        register = block.get("register", "?")
+        color = reg_colors.get(register, "")
+        
+        print(f"    {block['id']} {color}{register}\033[0m {block['timestamp']}")
+        print(f"      {block['content']}")
+        print()
+    
+    print(f"    Total: {len(timeline)} blocks\n")
+
+
+def cmd_deps(block_id: str):
+    """Direct dependencies."""
+    all_blocks = load_all_blocks()
+    
+    if block_id not in all_blocks:
+        print(f"Block {block_id} not found.")
+        return
+    
+    block = all_blocks[block_id]
+    related = find_related_blocks(block, all_blocks)
+    
+    print(f"\n\033[1m  Dependencies for {block_id}:\033[0m\n")
+    
+    if related["linked_to"]:
+        print(f"    Links to: {', '.join(related['linked_to'])}")
+    
+    if related["linked_from"]:
+        print(f"    Linked from: {', '.join(related['linked_from'])}")
+    
+    if related["same_project"]:
+        print(f"    Same project ({block.get('project')}): {', '.join(related['same_project'][:5])}")
+    
+    if related["content_refs"]:
+        print(f"    Referenced in content: {', '.join(related['content_refs'])}")
+    
+    if not any(related.values()):
+        print("    No dependencies found (isolated block).")
+    
+    print()
+
+
+def main():
+    args = sys.argv[1:]
+    
+    if not args or args[0] == "help":
+        print(__doc__)
+    elif args[0] == "trace":
+        if len(args) < 2:
+            print("Usage: sint-archaeology trace <block_id>")
+        else:
+            cmd_trace(args[1])
+    elif args[0] == "tree":
+        if len(args) < 2:
+            print("Usage: sint-archaeology tree <block_id>")
+        else:
+            cmd_tree(args[1])
+    elif args[0] == "genesis":
+        if len(args) < 2:
+            print("Usage: sint-archaeology genesis <block_id>")
+        else:
+            cmd_genesis(args[1])
+    elif args[0] == "timeline":
+        if len(args) < 2:
+            print("Usage: sint-archaeology timeline <project>")
+        else:
+            cmd_timeline(args[1])
+    elif args[0] == "deps":
+        if len(args) < 2:
+            print("Usage: sint-archaeology deps <block_id>")
+        else:
+            cmd_deps(args[1])
+    else:
+        print(f"Unknown: {args[0]}")
+
+
+if __name__ == "__main__":
+    main()

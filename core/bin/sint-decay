@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""
+sint-decay — Temporal memory decay engine.
+
+Memory blocks have relevance scores that decay over time.
+Recently accessed/linked blocks stay "hot", old isolated ones "cool down".
+
+This mimics human memory: recent and frequently referenced things stay accessible,
+while old unused knowledge fades (but is never deleted).
+
+Usage:
+  python3 sint-decay.py decay      — Apply decay to all blocks
+  python3 sint-decay.py heat <id>  — Heat up a block (mark accessed)
+  python3 sint-decay.py tiers      — Show hot/warm/cold/cold tiers
+  python3 sint-decay.py stats      — Decay statistics
+"""
+
+import json
+import math
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+MEMORY_DIR = Path("/home/lain/.opencode/memory")
+BLOCKS_DIR = MEMORY_DIR / "blocks"
+STATE_FILE = MEMORY_DIR / "state.json"
+
+# Decay parameters
+DECAY_HALF_LIFE_DAYS = 30      # Block loses half relevance every 30 days
+MIN_RELEVANCE = 0.01           # Floor — never fully zero
+LINK_BOOST = 0.15              # Each link to/from other block boosts relevance
+ACCESS_BOOST = 0.3             # Direct access/heating boosts relevance
+PROJECT_FRESHNESS = 0.1        # Boost for blocks in active projects
+
+# Tier thresholds
+TIER_HOT = 0.7
+TIER_WARM = 0.4
+TIER_COLD = 0.15
+
+
+def get_block_mtime(block_file: Path) -> datetime:
+    """Get block's last modified time or timestamp from content."""
+    try:
+        block = json.loads(block_file.read_text())
+        ts = block.get("timestamp", "")
+        if ts:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+    except:
+        pass
+    return datetime.fromtimestamp(block_file.stat().st_mtime)
+
+
+def compute_base_relevance(block: dict) -> float:
+    """Compute base relevance from block metadata."""
+    score = 1.0
+    
+    # Confidence factor
+    confidence = block.get("confidence", 0.5)
+    score *= confidence
+    
+    # Register factor (FACTs and ACTIONs more relevant than OPINIONs)
+    register = block.get("register", "SENSE")
+    register_weights = {
+        "FACT": 1.0,
+        "ACTION": 0.95,
+        "LOGIC": 0.9,
+        "SENSE": 0.7,
+        "OPINION": 0.6
+    }
+    score *= register_weights.get(register, 0.7)
+    
+    return score
+
+
+def compute_decay(block_file: Path) -> float:
+    """Compute temporal decay for a block."""
+    block = json.loads(block_file.read_text())
+    mtime = get_block_mtime(block_file)
+    now = datetime.now()
+    
+    age_days = (now - mtime).total_seconds() / 86400
+    
+    # Exponential decay with half-life
+    decay = math.exp(-0.693 * age_days / DECAY_HALF_LIFE_DAYS)
+    
+    return max(decay, MIN_RELEVANCE)
+
+
+def compute_link_factor(block: dict) -> float:
+    """Boost relevance based on links to/from other blocks."""
+    links = block.get("links", [])
+    bid = block.get("id", "")
+    
+    # Check how many other blocks link TO this block
+    inbound = 0
+    for f in BLOCKS_DIR.glob("*.json"):
+        other = json.loads(f.read_text())
+        if bid in other.get("links", []):
+            inbound += 1
+    
+    total_links = len(links) + inbound
+    return 1.0 + (total_links * LINK_BOOST)
+
+
+def compute_project_boost(block: dict) -> float:
+    """Boost if block is in an active project."""
+    if not STATE_FILE.exists():
+        return 1.0
+    
+    state = json.loads(STATE_FILE.read_text())
+    active_projects = [f.get("project") for f in state.get("focus", [])]
+    
+    project = block.get("project", "")
+    if project in active_projects:
+        return 1.0 + PROJECT_FRESHNESS
+    
+    return 1.0
+
+
+def compute_final_relevance(block_file: Path) -> float:
+    """Compute final relevance score for a block."""
+    block = json.loads(block_file.read_text())
+    
+    base = compute_base_relevance(block)
+    decay = compute_decay(block_file)
+    link_factor = compute_link_factor(block)
+    project_boost = compute_project_boost(block)
+    
+    # Check if block was explicitly heated
+    heated_until = block.get("_heated_until")
+    if heated_until:
+        try:
+            heat_until = datetime.fromisoformat(heated_until.replace("Z", ""))
+            if datetime.now() < heat_until:
+                return min(1.0, base * (1.0 + ACCESS_BOOST) * link_factor * project_boost)
+        except:
+            pass
+    
+    score = base * decay * link_factor * project_boost
+    return max(min(score, 1.0), MIN_RELEVANCE)
+
+
+def cmd_decay():
+    """Apply decay to all blocks and write relevance scores."""
+    if not BLOCKS_DIR.exists():
+        print("No blocks directory.")
+        return
+    
+    results = []
+    for f in sorted(BLOCKS_DIR.glob("*.json")):
+        block = json.loads(f.read_text())
+        relevance = compute_final_relevance(f)
+        
+        # Write relevance back to block
+        block["_relevance"] = round(relevance, 4)
+        block["_relevance_updated"] = datetime.now().isoformat() + "Z"
+        f.write_text(json.dumps(block, indent=2, ensure_ascii=False))
+        
+        bid = block.get("id", "?")
+        reg = block.get("register", "?")
+        tier = get_tier(relevance)
+        results.append((bid, reg, relevance, tier))
+    
+    # Print results
+    print(f"\nDecay applied to {len(results)} blocks:\n")
+    for bid, reg, rel, tier in results:
+        bar = "█" * int(rel * 20) + "░" * (20 - int(rel * 20))
+        color = {"hot": "\033[31m", "warm": "\033[33m", "cool": "\033[36m", "cold": "\033[2m"}
+        c = color.get(tier, "")
+        print(f"  {bid} {reg:8s} {c}{bar} {rel:.3f} [{tier}]\033[0m")
+    print()
+
+
+def get_tier(relevance: float) -> str:
+    if relevance >= TIER_HOT:
+        return "hot"
+    elif relevance >= TIER_WARM:
+        return "warm"
+    elif relevance >= TIER_COLD:
+        return "cool"
+    else:
+        return "cold"
+
+
+def cmd_heat(block_id: str):
+    """Heat up a block — mark as recently accessed."""
+    for f in BLOCKS_DIR.glob(f"{block_id}.*.json"):
+        block = json.loads(f.read_text())
+        # Heat for 7 days
+        heat_until = (datetime.now() + timedelta(days=7)).isoformat() + "Z"
+        block["_heated_until"] = heat_until
+        block["_last_heated"] = datetime.now().isoformat() + "Z"
+        f.write_text(json.dumps(block, indent=2, ensure_ascii=False))
+        
+        print(f"  Block {block_id} heated until {heat_until[:10]}")
+        return
+    
+    print(f"  Block {block_id} not found")
+
+
+def cmd_tiers():
+    """Show blocks grouped by relevance tier."""
+    if not BLOCKS_DIR.exists():
+        print("No blocks.")
+        return
+    
+    tiers = {"hot": [], "warm": [], "cool": [], "cold": []}
+    
+    for f in sorted(BLOCKS_DIR.glob("*.json")):
+        block = json.loads(f.read_text())
+        relevance = block.get("_relevance")
+        
+        if relevance is None:
+            relevance = compute_final_relevance(f)
+            block["_relevance"] = round(relevance, 4)
+            f.write_text(json.dumps(block, indent=2, ensure_ascii=False))
+        
+        tier = get_tier(relevance)
+        bid = block.get("id", "?")
+        reg = block.get("register", "?")
+        content = block.get("content", "")[:50]
+        tiers[tier].append((bid, reg, relevance, content))
+    
+    print()
+    icons = {"hot": "\033[31m🔥", "warm": "\033[33m🌡", "cool": "\033[36m❄", "cold": "\033[2m🧊"}
+    
+    for tier_name in ["hot", "warm", "cool", "cold"]:
+        items = tiers[tier_name]
+        icon = icons[tier_name]
+        print(f"  {icon} {tier_name.upper()}\033[0m ({len(items)} blocks)")
+        for bid, reg, rel, content in items[:5]:
+            print(f"    {bid} {reg:8s} {rel:.3f} {content}")
+        if len(items) > 5:
+            print(f"    ... and {len(items) - 5} more")
+        print()
+
+
+def cmd_stats():
+    """Show decay statistics."""
+    if not BLOCKS_DIR.exists():
+        print("No blocks.")
+        return
+    
+    relevances = []
+    tiers = {"hot": 0, "warm": 0, "cool": 0, "cold": 0}
+    
+    for f in BLOCKS_DIR.glob("*.json"):
+        block = json.loads(f.read_text())
+        rel = block.get("_relevance") or compute_final_relevance(f)
+        relevances.append(rel)
+        tiers[get_tier(rel)] += 1
+    
+    if not relevances:
+        print("No blocks to analyze.")
+        return
+    
+    avg = sum(relevances) / len(relevances)
+    
+    print(f"\n  Decay Statistics:")
+    print(f"    Total blocks: {len(relevances)}")
+    print(f"    Avg relevance: {avg:.3f}")
+    print(f"    Hot:  {tiers['hot']} blocks")
+    print(f"    Warm: {tiers['warm']} blocks")
+    print(f"    Cool: {tiers['cool']} blocks")
+    print(f"    Cold: {tiers['cold']} blocks")
+    print(f"    Half-life: {DECAY_HALF_LIFE_DAYS} days")
+    print()
+
+
+def main():
+    args = sys.argv[1:]
+    
+    if not args or args[0] == "help":
+        print(__doc__)
+    elif args[0] == "decay":
+        cmd_decay()
+    elif args[0] == "heat":
+        if len(args) < 2:
+            print("Usage: sint-decay heat <block_id>")
+        else:
+            cmd_heat(args[1])
+    elif args[0] == "tiers":
+        cmd_tiers()
+    elif args[0] == "stats":
+        cmd_stats()
+    else:
+        print(f"Unknown: {args[0]}")
+
+
+if __name__ == "__main__":
+    main()

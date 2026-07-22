@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+"""
+sint-drift — Cross-session drift detection for SINT-UA agent system.
+
+Monitors register distribution, confidence trends, and semantic consistency
+across sessions. Detects when agent starts:
+- Expressing opinions as facts (register drift)
+- Losing confidence in claims (confidence decay)
+- Drifting from original task (topic drift)
+- Fabricating sources (source gaps)
+
+Usage:
+  python3 sint-drift.py analyze       — Full drift analysis
+  python3 sint-drift.py baseline      — Set current state as baseline
+  python3 sint-drift.py alert         — Check for drift alerts only
+  python3 sint-drift.py history       — Drift history over sessions
+"""
+
+import json
+import math
+import sys
+from collections import Counter, defaultdict
+from datetime import datetime
+from pathlib import Path
+
+MEMORY_DIR = Path("/home/lain/.opencode/memory")
+BLOCKS_DIR = MEMORY_DIR / "blocks"
+CHAIN_FILE = MEMORY_DIR / "chain.jsonl"
+STATE_FILE = MEMORY_DIR / "state.json"
+SESSIONS_DIR = MEMORY_DIR / "sessions"
+BASELINE_FILE = MEMORY_DIR / "drift_baseline.json"
+HISTORY_FILE = MEMORY_DIR / "drift_history.jsonl"
+
+# Alert thresholds
+REGISTER_IMBALANCE_THRESHOLD = 0.3   # Max deviation from expected distribution
+CONFIDENCE_DROP_THRESHOLD = 0.2      # Confidence drop triggers alert
+SOURCE_GAP_THRESHOLD = 0.4           # % of FACTs without sources
+TOPIC_DRIFT_THRESHOLD = 0.6          # Cosine similarity threshold
+
+# Expected register distribution (healthy agent)
+EXPECTED_DISTRIBUTION = {
+    "FACT": 0.35,      # Should be most common
+    "SENSE": 0.25,     # Raw observations
+    "LOGIC": 0.20,     # Inferences
+    "ACTION": 0.15,    # Plans
+    "OPINION": 0.05    # Should be rare (labeled clearly)
+}
+
+
+def load_blocks() -> list:
+    if not BLOCKS_DIR.exists():
+        return []
+    blocks = []
+    for f in BLOCKS_DIR.glob("*.json"):
+        try:
+            blocks.append(json.loads(f.read_text()))
+        except:
+            pass
+    return sorted(blocks, key=lambda b: b.get("id", "0000"))
+
+
+def load_baseline() -> dict | None:
+    if BASELINE_FILE.exists():
+        return json.loads(BASELINE_FILE.read_text())
+    return None
+
+
+def get_session_blocks() -> dict[str, list]:
+    """Group blocks by session date."""
+    sessions = defaultdict(list)
+    for f in BLOCKS_DIR.glob("*.json"):
+        try:
+            block = json.loads(f.read_text())
+            ts = block.get("timestamp", "")
+            if ts:
+                date = ts[:10]
+                sessions[date].append(block)
+        except:
+            pass
+    return dict(sessions)
+
+
+def compute_register_distribution(blocks: list) -> dict[str, float]:
+    if not blocks:
+        return {}
+    counts = Counter(b.get("register", "UNKNOWN") for b in blocks)
+    total = sum(counts.values())
+    return {reg: count / total for reg, count in counts.items()}
+
+
+def compute_confidence_stats(blocks: list) -> dict:
+    confidences = [b.get("confidence", 0.5) for b in blocks]
+    if not confidences:
+        return {"mean": 0, "std": 0, "min": 0, "max": 0}
+    
+    mean = sum(confidences) / len(confidences)
+    variance = sum((c - mean) ** 2 for c in confidences) / len(confidences)
+    
+    return {
+        "mean": mean,
+        "std": math.sqrt(variance),
+        "min": min(confidences),
+        "max": max(confidences),
+        "count": len(confidences)
+    }
+
+
+def compute_source_coverage(blocks: list) -> dict:
+    fact_blocks = [b for b in blocks if b.get("register") == "FACT"]
+    if not fact_blocks:
+        return {"total_facts": 0, "with_source": 0, "coverage": 1.0}
+    
+    with_source = sum(1 for b in fact_blocks 
+                      if b.get("source") and b["source"] not in ["agent", "migration", "CLI"])
+    
+    return {
+        "total_facts": len(fact_blocks),
+        "with_source": with_source,
+        "coverage": with_source / len(fact_blocks) if fact_blocks else 1.0
+    }
+
+
+def compute_topic_consistency(blocks: list) -> float:
+    """Simple topic consistency based on project distribution."""
+    if not blocks:
+        return 1.0
+    
+    projects = Counter(b.get("project", "UNKNOWN") for b in blocks)
+    total = sum(projects.values())
+    
+    # Entropy-based consistency (lower entropy = more focused)
+    entropy = 0
+    for count in projects.values():
+        p = count / total
+        if p > 0:
+            entropy -= p * math.log2(p)
+    
+    # Normalize to 0-1 (0 = max entropy, 1 = single topic)
+    max_entropy = math.log2(len(projects)) if projects else 0
+    if max_entropy == 0:
+        return 1.0
+    
+    return 1.0 - (entropy / max_entropy)
+
+
+def detect_register_drift(current: dict, baseline: dict | None = None) -> list:
+    """Detect register distribution drift."""
+    alerts = []
+    
+    if baseline is None:
+        baseline = EXPECTED_DISTRIBUTION
+    
+    for reg, expected in baseline.items():
+        actual = current.get(reg, 0)
+        deviation = abs(actual - expected)
+        
+        if deviation > REGISTER_IMBALANCE_THRESHOLD:
+            direction = "more" if actual > expected else "fewer"
+            alerts.append({
+                "type": "register_drift",
+                "severity": "warning" if deviation < 0.5 else "critical",
+                "register": reg,
+                "expected": expected,
+                "actual": actual,
+                "deviation": deviation,
+                "message": f"Agent producing {direction} {reg} blocks than expected ({actual:.1%} vs {expected:.1%})"
+            })
+    
+    return alerts
+
+
+def detect_confidence_drift(blocks: list, baseline: dict | None = None) -> list:
+    """Detect confidence score drift."""
+    alerts = []
+    stats = compute_confidence_stats(blocks)
+    
+    if baseline and "confidence" in baseline:
+        bl_mean = baseline["confidence"]["mean"]
+        drop = bl_mean - stats["mean"]
+        
+        if drop > CONFIDENCE_DROP_THRESHOLD:
+            alerts.append({
+                "type": "confidence_drift",
+                "severity": "warning",
+                "baseline_mean": bl_mean,
+                "current_mean": stats["mean"],
+                "drop": drop,
+                "message": f"Mean confidence dropped from {bl_mean:.2f} to {stats['mean']:.2f}"
+            })
+    
+    # Low confidence blocks
+    low_conf = [b for b in blocks if b.get("confidence", 1) < 0.5]
+    if low_conf and len(low_conf) / len(blocks) > 0.3:
+        alerts.append({
+            "type": "low_confidence",
+            "severity": "warning",
+            "count": len(low_conf),
+            "ratio": len(low_conf) / len(blocks),
+            "message": f"{len(low_conf)} blocks ({len(low_conf)/len(blocks):.0%}) have confidence < 0.5"
+        })
+    
+    return alerts
+
+
+def detect_source_gaps(blocks: list) -> list:
+    """Detect FACT blocks without proper sources."""
+    alerts = []
+    coverage = compute_source_coverage(blocks)
+    
+    if coverage["coverage"] < SOURCE_GAP_THRESHOLD:
+        alerts.append({
+            "type": "source_gap",
+            "severity": "critical",
+            "coverage": coverage["coverage"],
+            "total_facts": coverage["total_facts"],
+            "with_source": coverage["with_source"],
+            "message": f"Only {coverage['coverage']:.0%} of FACT blocks have proper sources"
+        })
+    
+    return alerts
+
+
+def detect_opinion_contamination(blocks: list) -> list:
+    """Detect OPINION blocks that should be FACT or LOGIC."""
+    alerts = []
+    
+    opinion_blocks = [b for b in blocks if b.get("register") == "OPINION"]
+    
+    for block in opinion_blocks:
+        content = block.get("content", "").lower()
+        
+        # Check for opinion-as-fact patterns
+        fact_phrases = ["is", "are", "was", "has been", "proven", "verified", "confirmed"]
+        opinion_phrases = ["i think", "i believe", "in my opinion", "arguably", "seems"]
+        
+        has_fact_language = any(phrase in content for phrase in fact_phrases)
+        has_opinion_label = any(phrase in content for phrase in opinion_phrases)
+        
+        if has_fact_language and not has_opinion_label:
+            alerts.append({
+                "type": "opinion_contamination",
+                "severity": "critical",
+                "block_id": block.get("id"),
+                "content": content[:100],
+                "message": f"OPINION block {block.get('id')} uses fact-like language without clear labeling"
+            })
+    
+    return alerts
+
+
+def cmd_analyze():
+    """Full drift analysis."""
+    blocks = load_blocks()
+    if not blocks:
+        print("No blocks to analyze.")
+        return
+    
+    baseline = load_baseline()
+    current_dist = compute_register_distribution(blocks)
+    conf_stats = compute_confidence_stats(blocks)
+    source_coverage = compute_source_coverage(blocks)
+    topic_consistency = compute_topic_consistency(blocks)
+    
+    print(f"\n\033[1m\033[36m{'='*60}\033[0m")
+    print(f"\033[1m\033[36m  SINT-DRIFT — Cross-Session Analysis\033[0m")
+    print(f"\033[1m\033[36m{'='*60}\033[0m\n")
+    
+    # Register Distribution
+    print(f"\033[1m  Register Distribution:\033[0m")
+    for reg in ["FACT", "SENSE", "LOGIC", "ACTION", "OPINION"]:
+        actual = current_dist.get(reg, 0)
+        expected = EXPECTED_DISTRIBUTION.get(reg, 0)
+        bar = "█" * int(actual * 40)
+        diff = actual - expected
+        color = "\033[32m" if abs(diff) < 0.1 else "\033[33m" if abs(diff) < 0.2 else "\033[31m"
+        print(f"    {reg:8s} {color}{bar} {actual:.1%}\033[0m (expected {expected:.1%})")
+    
+    # Confidence
+    print(f"\n\033[1m  Confidence:\033[0m")
+    print(f"    Mean:   {conf_stats['mean']:.3f}")
+    print(f"    Std:    {conf_stats['std']:.3f}")
+    print(f"    Range:  [{conf_stats['min']:.2f}, {conf_stats['max']:.2f}]")
+    
+    # Source Coverage
+    print(f"\n\033[1m  Source Coverage:\033[0m")
+    cov = source_coverage["coverage"]
+    color = "\033[32m" if cov > 0.7 else "\033[33m" if cov > 0.4 else "\033[31m"
+    print(f"    FACT blocks with sources: {color}{source_coverage['with_source']}/{source_coverage['total_facts']} ({cov:.0%})\033[0m")
+    
+    # Topic Consistency
+    print(f"\n\033[1m  Topic Consistency:\033[0m")
+    tc = topic_consistency
+    color = "\033[32m" if tc > 0.6 else "\033[33m" if tc > 0.3 else "\033[31m"
+    print(f"    Score: {color}{tc:.2f}\033[0m (1.0 = single topic, 0.0 = scattered)")
+    
+    # Alerts
+    all_alerts = []
+    all_alerts.extend(detect_register_drift(current_dist, baseline))
+    all_alerts.extend(detect_confidence_drift(blocks, baseline))
+    all_alerts.extend(detect_source_gaps(blocks))
+    all_alerts.extend(detect_opinion_contamination(blocks))
+    
+    if all_alerts:
+        print(f"\n\033[1m  \033[33m⚠ Alerts ({len(all_alerts)}):\033[0m")
+        for alert in all_alerts:
+            sev = alert.get("severity", "info")
+            color = "\033[31m" if sev == "critical" else "\033[33m" if sev == "warning" else "\033[36m"
+            print(f"    {color}[{sev.upper()}]\033[0m {alert.get('message', '?')}")
+    else:
+        print(f"\n\033[1m  \033[32m✓ No drift alerts\033[0m")
+    
+    # Record history
+    history_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "block_count": len(blocks),
+        "register_distribution": current_dist,
+        "confidence_mean": conf_stats["mean"],
+        "source_coverage": cov,
+        "topic_consistency": tc,
+        "alert_count": len(all_alerts)
+    }
+    
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(HISTORY_FILE, "a") as f:
+        f.write(json.dumps(history_entry, ensure_ascii=False) + "\n")
+    
+    print(f"\n\033[2m  History recorded. Run 'sint-drift baseline' to set new baseline.\033[0m\n")
+
+
+def cmd_baseline():
+    """Set current state as baseline."""
+    blocks = load_blocks()
+    if not blocks:
+        print("No blocks.")
+        return
+    
+    baseline = {
+        "timestamp": datetime.now().isoformat(),
+        "block_count": len(blocks),
+        "register_distribution": compute_register_distribution(blocks),
+        "confidence": compute_confidence_stats(blocks),
+        "source_coverage": compute_source_coverage(blocks),
+        "topic_consistency": compute_topic_consistency(blocks)
+    }
+    
+    BASELINE_FILE.write_text(json.dumps(baseline, indent=2, ensure_ascii=False))
+    print(f"\n  Baseline set: {len(blocks)} blocks")
+    print(f"  Registers: {json.dumps(baseline['register_distribution'])}")
+    print(f"  Confidence mean: {baseline['confidence']['mean']:.3f}")
+    print(f"  Source coverage: {baseline['source_coverage']['coverage']:.0%}\n")
+
+
+def cmd_alert():
+    """Quick alert check."""
+    blocks = load_blocks()
+    if not blocks:
+        print("No blocks.")
+        return
+    
+    baseline = load_baseline()
+    current_dist = compute_register_distribution(blocks)
+    
+    all_alerts = []
+    all_alerts.extend(detect_register_drift(current_dist, baseline))
+    all_alerts.extend(detect_confidence_drift(blocks, baseline))
+    all_alerts.extend(detect_source_gaps(blocks))
+    all_alerts.extend(detect_opinion_contamination(blocks))
+    
+    if all_alerts:
+        for alert in all_alerts:
+            sev = alert.get("severity", "info")
+            icon = "🔴" if sev == "critical" else "🟡" if sev == "warning" else "🔵"
+            print(f"  {icon} [{sev.upper()}] {alert.get('message', '?')}")
+    else:
+        print("  ✓ No drift detected")
+
+
+def cmd_history():
+    """Show drift history."""
+    if not HISTORY_FILE.exists():
+        print("No history yet. Run 'sint-drift analyze' first.")
+        return
+    
+    lines = HISTORY_FILE.read_text().strip().split("\n")
+    entries = [json.loads(l) for l in lines if l.strip()]
+    
+    print(f"\n\033[1m  Drift History ({len(entries)} entries):\033[0m\n")
+    
+    prev_alerts = 0
+    for entry in entries[-10:]:
+        ts = entry.get("timestamp", "?")[:16]
+        blocks = entry.get("block_count", 0)
+        conf = entry.get("confidence_mean", 0)
+        alerts = entry.get("alert_count", 0)
+        
+        trend = "→" if alerts == prev_alerts else "↑" if alerts > prev_alerts else "↓"
+        color = "\033[32m" if alerts == 0 else "\033[33m" if alerts < 3 else "\033[31m"
+        
+        print(f"    {ts}  {blocks:3d} blocks  conf={conf:.2f}  {color}{trend} {alerts} alerts\033[0m")
+        prev_alerts = alerts
+    
+    print()
+
+
+def main():
+    args = sys.argv[1:]
+    
+    if not args or args[0] == "help":
+        print(__doc__)
+    elif args[0] == "analyze":
+        cmd_analyze()
+    elif args[0] == "baseline":
+        cmd_baseline()
+    elif args[0] == "alert":
+        cmd_alert()
+    elif args[0] == "history":
+        cmd_history()
+    else:
+        print(f"Unknown: {args[0]}")
+
+
+if __name__ == "__main__":
+    main()

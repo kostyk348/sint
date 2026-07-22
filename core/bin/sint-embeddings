@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""
+sint-embeddings — Vector embedding engine for SINT memory blocks.
+
+Uses sentence-transformers for semantic search across memory blocks.
+Embeddings are cached and updated incrementally.
+
+Usage:
+  python3 sint-embeddings.py index         — Build/rebuild embedding index
+  python3 sint-embeddings.py search <query> — Semantic search
+  python3 sint-embeddings.py similar <id>   — Find similar blocks
+  python3 sint-embeddings.py clusters       — Show semantic clusters
+  python3 sint-embeddings.py stats          — Index statistics
+"""
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+MEMORY_DIR = Path(os.environ.get("SINT_MEMORY_DIR", "/home/lain/.opencode/memory"))
+BLOCKS_DIR = MEMORY_DIR / "blocks"
+INDEX_DIR = MEMORY_DIR / "embeddings"
+INDEX_FILE = INDEX_DIR / "index.npz"
+META_FILE = INDEX_DIR / "meta.json"
+CLUSTERS_FILE = INDEX_DIR / "clusters.json"
+
+# Embedding model (small, fast, good enough)
+MODEL_NAME = "all-MiniLM-L6-v2"
+
+_model = None
+
+
+def get_model():
+    global _model
+    if _model is None:
+        from sentence_transformers import SentenceTransformer
+        _model = SentenceTransformer(MODEL_NAME)
+    return _model
+
+
+def load_blocks() -> dict:
+    blocks = {}
+    if not BLOCKS_DIR.exists():
+        return blocks
+    for f in BLOCKS_DIR.glob("*.json"):
+        try:
+            block = json.loads(f.read_text())
+            blocks[block["id"]] = block
+        except:
+            pass
+    return blocks
+
+
+def block_to_text(block: dict) -> str:
+    """Convert block to text for embedding."""
+    parts = [
+        block.get("register", ""),
+        block.get("project", ""),
+        block.get("content", ""),
+        " ".join(block.get("tags", []))
+    ]
+    return " ".join(p for p in parts if p)
+
+
+def build_index():
+    """Build embedding index for all blocks."""
+    INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    
+    blocks = load_blocks()
+    if not blocks:
+        print("No blocks to index.")
+        return
+    
+    print(f"\n  Indexing {len(blocks)} blocks...")
+    
+    # Check for existing index
+    existing = {}
+    if META_FILE.exists():
+        meta = json.loads(META_FILE.read_text())
+        existing = {m["id"]: m for m in meta.get("blocks", [])}
+    
+    # Find blocks that need new embeddings
+    to_embed = []
+    meta_entries = []
+    
+    for bid, block in blocks.items():
+        if bid in existing:
+            # Use cached embedding
+            meta_entries.append(existing[bid])
+        else:
+            to_embed.append(block)
+            meta_entries.append({
+                "id": bid,
+                "register": block.get("register", ""),
+                "project": block.get("project", ""),
+                "content_preview": block.get("content", "")[:100]
+            })
+    
+    # Compute embeddings for new blocks
+    if to_embed:
+        model = get_model()
+        texts = [block_to_text(b) for b in to_embed]
+        
+        print(f"  Computing embeddings for {len(to_embed)} new blocks...")
+        embeddings = model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
+        
+        # Update meta entries with embedding indices
+        idx = 0
+        for i, entry in enumerate(meta_entries):
+            if entry["id"] in [b["id"] for b in to_embed]:
+                entry["embedding_idx"] = len(meta_entries) - len(to_embed) + idx
+                idx += 1
+            else:
+                # Find existing index
+                for j, m in enumerate(meta_entries):
+                    if m["id"] == entry["id"] and "embedding_idx" in m:
+                        break
+    
+    # Build full embedding matrix
+    all_blocks = list(blocks.values())
+    all_texts = [block_to_text(b) for b in all_blocks]
+    
+    model = get_model()
+    all_embeddings = model.encode(all_texts, show_progress_bar=False, normalize_embeddings=True)
+    
+    # Save index
+    np.savez_compressed(INDEX_FILE, embeddings=all_embeddings)
+    
+    # Save metadata
+    meta = {
+        "model": MODEL_NAME,
+        "created": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "count": len(all_blocks),
+        "dimension": all_embeddings.shape[1],
+        "blocks": [
+            {
+                "id": b["id"],
+                "register": b.get("register", ""),
+                "project": b.get("project", ""),
+                "content_preview": b.get("content", "")[:100]
+            }
+            for b in all_blocks
+        ]
+    }
+    META_FILE.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    
+    print(f"  ✓ Indexed {len(all_blocks)} blocks (dim={all_embeddings.shape[1]})")
+    print(f"  ✓ Saved to {INDEX_DIR}")
+
+
+def load_index():
+    """Load embedding index."""
+    if not INDEX_FILE.exists() or not META_FILE.exists():
+        print("Index not found. Run 'sint-embeddings index' first.")
+        return None, None
+    
+    data = np.load(INDEX_FILE)
+    embeddings = data["embeddings"]
+    meta = json.loads(META_FILE.read_text())
+    
+    return embeddings, meta
+
+
+def semantic_search(query: str, top_k: int = 10) -> list:
+    """Semantic search across all blocks."""
+    embeddings, meta = load_index()
+    if embeddings is None:
+        return []
+    
+    model = get_model()
+    query_embedding = model.encode([query], normalize_embeddings=True)[0]
+    
+    # Cosine similarity (embeddings are normalized)
+    similarities = embeddings @ query_embedding
+    
+    # Get top-k
+    top_indices = np.argsort(similarities)[::-1][:top_k]
+    
+    results = []
+    for idx in top_indices:
+        if idx < len(meta["blocks"]):
+            block_meta = meta["blocks"][idx]
+            results.append({
+                "id": block_meta["id"],
+                "register": block_meta["register"],
+                "project": block_meta["project"],
+                "score": float(similarities[idx]),
+                "content": block_meta["content_preview"]
+            })
+    
+    return results
+
+
+def find_similar(block_id: str, top_k: int = 5) -> list:
+    """Find blocks similar to a given block."""
+    embeddings, meta = load_index()
+    if embeddings is None:
+        return []
+    
+    # Find block index
+    block_idx = None
+    for i, m in enumerate(meta["blocks"]):
+        if m["id"] == block_id:
+            block_idx = i
+            break
+    
+    if block_idx is None:
+        print(f"Block {block_id} not in index.")
+        return []
+    
+    # Get similarities
+    query_embedding = embeddings[block_idx]
+    similarities = embeddings @ query_embedding
+    
+    # Exclude self and get top-k
+    top_indices = np.argsort(similarities)[::-1]
+    results = []
+    for idx in top_indices:
+        if idx != block_idx and len(results) < top_k:
+            m = meta["blocks"][idx]
+            results.append({
+                "id": m["id"],
+                "register": m["register"],
+                "project": m["project"],
+                "score": float(similarities[idx]),
+                "content": m["content_preview"]
+            })
+    
+    return results
+
+
+def compute_clusters(n_clusters: int = 5) -> dict:
+    """Compute semantic clusters using K-means."""
+    embeddings, meta = load_index()
+    if embeddings is None:
+        return {}
+    
+    from sklearn.cluster import KMeans
+    
+    n_clusters = min(n_clusters, len(embeddings))
+    if n_clusters < 2:
+        return {"clusters": []}
+    
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    labels = kmeans.fit_predict(embeddings)
+    
+    clusters = {}
+    for i, label in enumerate(labels):
+        label = int(label)
+        if label not in clusters:
+            clusters[label] = []
+        
+        block_meta = meta["blocks"][i]
+        clusters[label].append({
+            "id": block_meta["id"],
+            "register": block_meta["register"],
+            "project": block_meta["project"],
+            "content": block_meta["content_preview"]
+        })
+    
+    # Find cluster centers (most similar blocks to centroid)
+    cluster_info = []
+    for label, members in clusters.items():
+        centroid = kmeans.cluster_centers_[label]
+        
+        # Find closest block to centroid
+        sims = embeddings @ centroid
+        closest_idx = np.argmax(sims)
+        center_block = meta["blocks"][closest_idx] if closest_idx < len(meta["blocks"]) else None
+        
+        cluster_info.append({
+            "label": label,
+            "size": len(members),
+            "center": center_block,
+            "members": members[:5]  # Top 5
+        })
+    
+    # Save clusters
+    CLUSTERS_FILE.write_text(json.dumps({
+        "computed": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "n_clusters": n_clusters,
+        "clusters": cluster_info
+    }, indent=2, ensure_ascii=False))
+    
+    return {"n_clusters": n_clusters, "clusters": cluster_info}
+
+
+def cmd_index():
+    build_index()
+
+
+def cmd_search(query: str):
+    results = semantic_search(query, top_k=10)
+    
+    if not results:
+        print("No results (index may need building).")
+        return
+    
+    print(f"\n\033[1m\033[36mSemantic Search: '{query}'\033[0m\n")
+    
+    for i, r in enumerate(results, 1):
+        score = r["score"]
+        color = "\033[32m" if score > 0.7 else "\033[33m" if score > 0.5 else "\033[2m"
+        print(f"  {i}. {color}{r['id']}\033[0m {r['register']:8s} {r['project']:10s} {color}{score:.3f}\033[0m")
+        print(f"     {r['content']}")
+    print()
+
+
+def cmd_similar(block_id: str):
+    results = find_similar(block_id, top_k=5)
+    
+    if not results:
+        print(f"No similar blocks found for {block_id}.")
+        return
+    
+    print(f"\n\033[1m\033[36mBlocks similar to {block_id}:\033[0m\n")
+    
+    for r in results:
+        score = r["score"]
+        color = "\033[32m" if score > 0.7 else "\033[33m" if score > 0.5 else "\033[2m"
+        print(f"  {color}{r['id']}\033[0m {r['register']:8s} {color}{score:.3f}\033[0m")
+        print(f"    {r['content']}")
+    print()
+
+
+def cmd_clusters():
+    result = compute_clusters()
+    
+    if not result or "clusters" not in result:
+        print("Could not compute clusters.")
+        return
+    
+    print(f"\n\033[1m\033[36mSemantic Clusters ({result['n_clusters']}):\033[0m\n")
+    
+    for cluster in result["clusters"]:
+        label = cluster["label"]
+        size = cluster["size"]
+        center = cluster["center"]
+        
+        print(f"  \033[1mCluster {label}\033[0m ({size} blocks)")
+        if center:
+            print(f"    Center: {center['id']} {center['register']}: {center['content'][:60]}")
+        
+        for m in cluster["members"][:3]:
+            print(f"    • {m['id']} {m['register']}: {m['content'][:50]}")
+        print()
+
+
+def cmd_stats():
+    if not META_FILE.exists():
+        print("Index not built. Run 'sint-embeddings index' first.")
+        return
+    
+    meta = json.loads(META_FILE.read_text())
+    
+    print(f"\n\033[1m\033[36mEmbedding Index Statistics:\033[0m\n")
+    print(f"  Model:      {meta.get('model', '?')}")
+    print(f"  Blocks:     {meta.get('count', 0)}")
+    print(f"  Dimension:  {meta.get('dimension', 0)}")
+    print(f"  Created:    {meta.get('created', '?')}")
+    
+    # Register distribution
+    from collections import Counter
+    regs = Counter(m["register"] for m in meta.get("blocks", []))
+    print(f"\n  By register:")
+    for reg, count in regs.most_common():
+        print(f"    {reg}: {count}")
+    
+    # Project distribution
+    projects = Counter(m["project"] for m in meta.get("blocks", []))
+    print(f"\n  By project:")
+    for proj, count in projects.most_common(5):
+        print(f"    {proj}: {count}")
+    
+    print()
+
+
+def main():
+    args = sys.argv[1:]
+    
+    if not args or args[0] == "help":
+        print(__doc__)
+    elif args[0] == "index":
+        cmd_index()
+    elif args[0] == "search":
+        cmd_search(" ".join(args[1:])) if len(args) > 1 else print("Usage: sint-embeddings search <query>")
+    elif args[0] == "similar":
+        cmd_similar(args[1]) if len(args) > 1 else print("Usage: sint-embeddings similar <block_id>")
+    elif args[0] == "clusters":
+        cmd_clusters()
+    elif args[0] == "stats":
+        cmd_stats()
+    else:
+        print(f"Unknown: {args[0]}")
+
+
+if __name__ == "__main__":
+    main()
