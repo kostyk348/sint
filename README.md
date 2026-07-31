@@ -513,4 +513,4 @@ Agent behavior is defined in `core/agents/`:
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+Apache 2.0 — see [LICENSE](LICENSE)
