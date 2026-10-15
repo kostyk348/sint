@@ -1,5 +1,9 @@
 # SINT — Structured Intelligence Network Topology
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![MCP](https://img.shields.io/badge/MCP-stdio_servers-blue)](https://modelcontextprotocol.io)
+
 > **Agents as systems, not chatbots with tools.**
 
 SINT is an agent architecture built on a core thesis: an agent is not a language model with function calling bolted on. It is a **cognitive system** with seven independent, replaceable layers — each with its own data structures, persistence model, and verification protocol.
@@ -355,7 +359,9 @@ pip install -r requirements.txt
 
 ### Running an MCP Server
 
-Each MCP server runs independently via stdio:
+Each MCP server runs independently via stdio. Verified on a clean clone (2026-10-15) with the core
+dependency installed: `cd mcp/crypto && python server.py` boots `FastMCP 4.1.0 — sint-crypto-mcp`
+and listens on stdio.
 
 ```bash
 # Perception
