@@ -3,6 +3,9 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-stdio_servers-blue)](https://modelcontextprotocol.io)
+[![Release](https://img.shields.io/github/v/release/kostyk348/sint?sort=semver&color=blue)](https://github.com/kostyk348/sint/releases)
+[![License](https://img.shields.io/badge/license-Apache-2.0-green)](https://github.com/kostyk348/sint/blob/main/LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/kostyk348/sint?branch=main)](https://github.com/kostyk348/sint/commits/main)
 
 > **Agents as systems, not chatbots with tools.**
 
@@ -350,10 +353,12 @@ Skills provide specialized instructions for specific tasks:
 
 ```bash
 # Clone the monorepo
+
 git clone https://github.com/kostyk348/sint.git
 cd sint
 
 # Install core dependencies
+
 pip install -r requirements.txt
 ```
 
@@ -365,25 +370,30 @@ and listens on stdio.
 
 ```bash
 # Perception
+
 cd mcp/algo && python server.py
 cd mcp/spec && python server.py
 cd mcp/re-graph && python server.py
 
 # Cognition
+
 cd mcp/devflow && python server.py
 cd mcp/crypto && python server.py
 cd mcp/embed && python server.py
 
 # Memory
+
 cd mcp/working && python server.py
 cd mcp/historian && python server.py
 cd mcp/self && python server.py
 
 # Feedback
+
 cd mcp/learner && python server.py
 cd mcp/portfolio && python server.py
 
 # Core
+
 cd core/mcp/sint-memory && python server.py
 ```
 
@@ -479,12 +489,14 @@ Agent behavior is defined in `core/agents/`:
 ## Roadmap
 
 ### Phase 1: Core (Complete)
+
 - [x] Hash-chain memory system
 - [x] Vector identity DB
 - [x] Multi-agent architecture
 - [x] Semantic register system
 
 ### Phase 2: Knowledge (Complete)
+
 - [x] Algorithm knowledge base
 - [x] RFC + format specs
 - [x] Binary graph (RE)
@@ -492,18 +504,21 @@ Agent behavior is defined in `core/agents/`:
 - [x] Embedded systems DB
 
 ### Phase 3: Intelligence (Complete)
+
 - [x] Working memory + epistemic state
 - [x] Cross-session learning
 - [x] Project portfolio
 - [x] Drift detection
 
 ### Phase 4: Metacognition (Planned)
+
 - [ ] Analogy engine (cross-domain mapping)
 - [ ] Constraint tracker (hard/soft limits)
 - [ ] Metacognitive monitor (error pattern analysis)
 - [ ] Session replay (failure analysis)
 
 ### Phase 5: Integration (Planned)
+
 - [ ] Log parser (events → timeline)
 - [ ] Cross-MCP orchestration
 - [ ] Automated feedback loops
