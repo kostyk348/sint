@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="sint">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#0d1218"/><stop offset="100%" stop-color="#17304a"/></linearGradient>
+<linearGradient id="ac" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#8fd6b4" stop-opacity="0.95"/><stop offset="100%" stop-color="#8fd6b4" stop-opacity="0.15"/></linearGradient>
+<pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity="0.045" stroke-width="1"/></pattern>
+</defs>
+<rect width="1200" height="300" fill="url(#bg)"/>
+<rect width="1200" height="300" fill="url(#grid)"/>
+<rect x="0" y="0" width="8" height="300" fill="url(#ac)"/>
+<circle cx="1030" cy="60" r="190" fill="#8fd6b4" fill-opacity="0.10"/>
+<circle cx="880" cy="270" r="150" fill="#8fd6b4" fill-opacity="0.06"/>
+<text x="64" y="66" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="19" fill="#8fd6b4" letter-spacing="3.2">PYTHON</text>
+<text x="64" y="140" font-family="ui-sans-serif,Segoe UI,Roboto,Helvetica,Arial,sans-serif" font-size="62" font-weight="700" fill="#ffffff" letter-spacing="-1">sint</text>
+<text x="64" y="186" font-family="ui-sans-serif,Segoe UI,Roboto,Helvetica,Arial,sans-serif" font-size="24" fill="#c8d4e8" fill-opacity="0.92">SINT Agent Ecosystem</text>
+<rect x="64" y="238" rx="14" ry="14" width="110" height="32" fill="#ffffff" fill-opacity="0.07" stroke="#8fd6b4" stroke-opacity="0.35"/>
+<text x="77" y="260" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="16" fill="#e6edf7">Python</text>
+</svg>
