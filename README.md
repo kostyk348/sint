@@ -1,11 +1,21 @@
+<div align="center">
+
+<img src="docs/banner.svg" alt="sint banner" width="1000">
+
 # SINT — Structured Intelligence Network Topology
+
+### SINT Agent Ecosystem
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-stdio_servers-blue)](https://modelcontextprotocol.io)
 [![Release](https://img.shields.io/github/v/release/kostyk348/sint?sort=semver&color=blue)](https://github.com/kostyk348/sint/releases)
-[![License](https://img.shields.io/badge/license-Apache-2.0-green)](https://github.com/kostyk348/sint/blob/main/LICENSE)
 [![Last commit](https://img.shields.io/github/last-commit/kostyk348/sint?branch=main)](https://github.com/kostyk348/sint/commits/main)
+
+</div>
+
+---
+
 
 > **Agents as systems, not chatbots with tools.**
 
